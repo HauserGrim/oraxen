@@ -2,14 +2,14 @@ package io.th0rgal.oraxen.items;
 
 import com.jeff_media.morepersistentdatatypes.DataType;
 import com.jeff_media.persistentdataserializer.PersistentDataSerializer;
+import io.th0rgal.oraxen.OraxenPlugin;
 import io.th0rgal.oraxen.api.OraxenItems;
 import io.th0rgal.oraxen.config.Settings;
-import io.th0rgal.oraxen.items.helpers.FoodComponentWrapper;
-import io.th0rgal.oraxen.items.helpers.ItemPropertyHandler;
 import io.th0rgal.oraxen.nms.NMSHandlers;
 import io.th0rgal.oraxen.utils.AdventureUtils;
 import io.th0rgal.oraxen.utils.ItemUtils;
 import io.th0rgal.oraxen.utils.VersionUtil;
+import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -24,6 +24,7 @@ import org.bukkit.event.enchantment.PrepareItemEnchantEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.inventory.PrepareAnvilEvent;
+import org.bukkit.event.player.PlayerItemConsumeEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.ItemStack;
@@ -31,10 +32,7 @@ import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.*;
 import org.bukkit.persistence.PersistentDataContainer;
 
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.*;
 
 import static io.th0rgal.oraxen.items.ItemBuilder.ORIGINAL_NAME_KEY;
 import static io.th0rgal.oraxen.items.ItemBuilder.UNSTACKABLE_KEY;
@@ -98,7 +96,7 @@ public class ItemUpdater implements Listener {
 
         if (!VersionUtil.atOrAbove("1.20.5") || player.getGameMode() == GameMode.CREATIVE) return;
         if (ItemUtils.isEmpty(itemStack) || ItemUtils.isTool(itemStack)) return;
-        if (NMSHandlers.getHandler().itemPropertyHandler().getDurability(itemStack.getItemMeta()) == null) return;
+        if (!(itemStack.getItemMeta() instanceof Damageable damageable) || !damageable.hasMaxDamage()) return;
 
         Optional.ofNullable(OraxenItems.getBuilderByItem(itemStack)).ifPresent(i -> {
                 if (i.isDamagedOnBlockBreak()) itemStack.damage(1, player);
@@ -112,10 +110,33 @@ public class ItemUpdater implements Listener {
 
         if (entity instanceof Player player && player.getGameMode() == GameMode.CREATIVE) return;
         if (ItemUtils.isEmpty(itemStack) || ItemUtils.isTool(itemStack)) return;
-        if (NMSHandlers.getHandler().itemPropertyHandler().getDurability(itemStack.getItemMeta()) == null) return;
+        if (!(itemStack.getItemMeta() instanceof Damageable damageable) || !damageable.hasMaxDamage()) return;
 
         Optional.ofNullable(OraxenItems.getBuilderByItem(itemStack)).ifPresent(i -> {
             if (i.isDamagedOnEntityHit()) itemStack.damage(1, entity);
+        });
+    }
+
+    // Until Paper changes getReplacement to use food-component, this is the best way
+    @EventHandler(ignoreCancelled = true)
+    public void onUseConvertedTo(PlayerItemConsumeEvent event) {
+        ItemStack itemStack = event.getItem();
+        if (!itemStack.hasItemMeta() || !itemStack.getItemMeta().hasFood()) return;
+        ItemStack usingConvertsTo = itemStack.getItemMeta().getFood().getUsingConvertsTo();
+        if (usingConvertsTo == null || !itemStack.isSimilar(ItemUpdater.updateItem(usingConvertsTo))) return;
+
+        PlayerInventory inventory = event.getPlayer().getInventory();
+        if (inventory.firstEmpty() == -1) event.setItem(event.getItem().add(usingConvertsTo.getAmount()));
+        else Bukkit.getScheduler().runTask(OraxenPlugin.get(), () -> {
+            for (int i = 0; i < inventory.getSize(); i++) {
+                ItemStack oldItem = inventory.getItem(i);
+                ItemStack newItem = ItemUpdater.updateItem(oldItem);
+                if (!itemStack.isSimilar(newItem)) continue;
+
+                // Remove the item and add it to fix stacking
+                inventory.setItem(i, null);
+                inventory.addItem(newItem);
+            }
         });
     }
 
@@ -156,7 +177,7 @@ public class ItemUpdater implements Listener {
             for (Map.Entry<Enchantment, Integer> entry : newMeta.getEnchants().entrySet().stream().filter(e -> !oldMeta.getEnchants().containsKey(e.getKey())).toList())
                 itemMeta.addEnchant(entry.getKey(), entry.getValue(), true);
 
-            int cmd = newMeta.hasCustomModelData() ? newMeta.getCustomModelData() : oldMeta.hasCustomModelData() ? oldMeta.getCustomModelData() : 0;
+            Integer cmd = newMeta.hasCustomModelData() ? (Integer) newMeta.getCustomModelData() : oldMeta.hasCustomModelData() ? (Integer) oldMeta.getCustomModelData() : null;
             itemMeta.setCustomModelData(cmd);
 
             // If OraxenItem has no lore, we should assume that 3rd-party plugin has added lore
@@ -165,11 +186,11 @@ public class ItemUpdater implements Listener {
 
             // Only change AttributeModifiers if the new item has some
             if (newMeta.hasAttributeModifiers()) itemMeta.setAttributeModifiers(newMeta.getAttributeModifiers());
-            else itemMeta.setAttributeModifiers(oldMeta.getAttributeModifiers());
+            else if (oldMeta.hasAttributeModifiers()) itemMeta.setAttributeModifiers(oldMeta.getAttributeModifiers());
 
             // Transfer over durability from old item
             if (itemMeta instanceof Damageable damageable && oldMeta instanceof Damageable oldDmg) {
-                damageable.setDamage(oldDmg.getDamage());
+                if (oldDmg.hasDamage()) damageable.setDamage(oldDmg.getDamage());
             }
 
             if (oldMeta.isUnbreakable()) itemMeta.setUnbreakable(true);
@@ -198,55 +219,59 @@ public class ItemUpdater implements Listener {
             }
 
             if (VersionUtil.atOrAbove("1.20.5")) {
-                ItemPropertyHandler itemProperties = NMSHandlers.getHandler().itemPropertyHandler();
+                if (newMeta.hasFood()) itemMeta.setFood(newMeta.getFood());
+                else if (oldMeta.hasFood()) itemMeta.setFood(oldMeta.getFood());
 
-                FoodComponentWrapper newFood = itemProperties.getFood(newMeta);
-                FoodComponentWrapper oldFood = itemProperties.getFood(oldMeta);
-                if (newFood != null) itemProperties.setFood(itemMeta, newFood);
-                else if (oldFood != null) itemProperties.setFood(itemMeta, oldFood);
+                if (newMeta.hasEnchantmentGlintOverride()) itemMeta.setEnchantmentGlintOverride(newMeta.getEnchantmentGlintOverride());
+                else if (oldMeta.hasEnchantmentGlintOverride()) itemMeta.setEnchantmentGlintOverride(oldMeta.getEnchantmentGlintOverride());
 
-                Boolean newGlint = itemProperties.getEnchantmentGlintOverride(newMeta);
-                Boolean oldGlint = itemProperties.getEnchantmentGlintOverride(oldMeta);
-                if (newGlint != null) itemProperties.setEnchantmentGlintOverride(itemMeta, newGlint);
-                else if (oldGlint != null) itemProperties.setEnchantmentGlintOverride(itemMeta, oldGlint);
-
-                Integer newMaxStack = itemProperties.getMaxStackSize(newMeta);
-                Integer oldMaxStack = itemProperties.getMaxStackSize(oldMeta);
-                if (newMaxStack != null) itemProperties.setMaxStackSize(itemMeta, newMaxStack);
-                else if (oldMaxStack != null) itemProperties.setMaxStackSize(itemMeta, oldMaxStack);
+                if (newMeta.hasMaxStackSize()) itemMeta.setMaxStackSize(newMeta.getMaxStackSize());
+                else if (oldMeta.hasMaxStackSize()) itemMeta.setMaxStackSize(oldMeta.getMaxStackSize());
 
                 if (VersionUtil.isPaperServer()) {
-                    net.kyori.adventure.text.Component newItemName = itemProperties.itemName(newMeta);
-                    net.kyori.adventure.text.Component oldItemName = itemProperties.itemName(oldMeta);
-                    if (newItemName != null) itemProperties.itemName(itemMeta, newItemName);
-                    else if (oldItemName != null) itemProperties.itemName(itemMeta, oldItemName);
+                    if (newMeta.hasItemName()) itemMeta.itemName(newMeta.itemName());
+                    else if (oldMeta.hasItemName()) itemMeta.itemName(oldMeta.itemName());
                 } else {
-                    String newItemName = itemProperties.getItemName(newMeta);
-                    String oldItemName = itemProperties.getItemName(oldMeta);
-                    if (newItemName != null) itemProperties.setItemName(itemMeta, newItemName);
-                    else if (oldItemName != null) itemProperties.setItemName(itemMeta, oldItemName);
+                    if (newMeta.hasItemName()) itemMeta.setItemName(newMeta.getItemName());
+                    else if (oldMeta.hasItemName()) itemMeta.setItemName(oldMeta.getItemName());
                 }
+            }
+
+            if (VersionUtil.atOrAbove("1.21")) {
+                if (newMeta.hasJukeboxPlayable()) itemMeta.setJukeboxPlayable(newMeta.getJukeboxPlayable());
+                else if (oldMeta.hasJukeboxPlayable()) itemMeta.setJukeboxPlayable(oldMeta.getJukeboxPlayable());
             }
 
             // On 1.20.5+ we use ItemName which is different from userchanged displaynames
             // Thus removing the need for this logic
             if (!VersionUtil.atOrAbove("1.20.5")) {
-                // Parsing with legacy here to fix any inconsistensies caused by server serializers etc
-                String oldDisplayName = AdventureUtils.parseLegacy(oldMeta.getDisplayName());
+
+                String oldDisplayName = oldMeta.hasDisplayName() ? AdventureUtils.parseLegacy(VersionUtil.isPaperServer() ? AdventureUtils.MINI_MESSAGE.serialize(oldMeta.displayName()) : AdventureUtils.parseLegacy(oldMeta.getDisplayName())) : null;
                 String originalName = AdventureUtils.parseLegacy(oldPdc.getOrDefault(ORIGINAL_NAME_KEY, DataType.STRING, ""));
+
                 if (Settings.OVERRIDE_RENAMED_ITEMS.toBool()) {
-                    itemMeta.setDisplayName(newMeta.getDisplayName());
+                    if (VersionUtil.isPaperServer()) itemMeta.displayName(newMeta.displayName());
+                    else itemMeta.setDisplayName(newMeta.getDisplayName());
                 } else if (!originalName.equals(oldDisplayName)) {
-                    itemMeta.setDisplayName(oldMeta.getDisplayName());
+                    if (VersionUtil.isPaperServer()) itemMeta.displayName(oldMeta.displayName());
+                    else itemMeta.setDisplayName(oldMeta.getDisplayName());
                 } else {
-                    itemMeta.setDisplayName(newMeta.getDisplayName());
+                    if (VersionUtil.isPaperServer()) itemMeta.displayName(newMeta.displayName());
+                    else itemMeta.setDisplayName(newMeta.getDisplayName());
                 }
+
+                originalName = newMeta.hasDisplayName() ? VersionUtil.isPaperServer()
+                        ? AdventureUtils.MINI_MESSAGE.serialize(newMeta.displayName())
+                        : newMeta.getDisplayName()
+                        : null;
+                if (originalName != null) itemPdc.set(ORIGINAL_NAME_KEY, DataType.STRING, originalName);
             }
 
-            itemPdc.set(ORIGINAL_NAME_KEY, DataType.STRING, newMeta.getDisplayName());
+
             // If the item is not unstackable, we should remove the unstackable tag
             // Also remove it on 1.20.5+ due to maxStackSize component
             if (VersionUtil.atOrAbove("1.20.5") || !newItemBuilder.isUnstackable()) itemPdc.remove(UNSTACKABLE_KEY);
+            else itemPdc.set(UNSTACKABLE_KEY, DataType.UUID, UUID.randomUUID());
         });
 
         return newItem;

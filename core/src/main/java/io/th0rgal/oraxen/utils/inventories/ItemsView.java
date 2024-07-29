@@ -7,7 +7,6 @@ import io.th0rgal.oraxen.OraxenPlugin;
 import io.th0rgal.oraxen.api.OraxenItems;
 import io.th0rgal.oraxen.config.Settings;
 import io.th0rgal.oraxen.items.ItemBuilder;
-import io.th0rgal.oraxen.items.ItemParser;
 import io.th0rgal.oraxen.items.ItemUpdater;
 import io.th0rgal.oraxen.utils.AdventureUtils;
 import io.th0rgal.oraxen.utils.ItemUtils;
@@ -83,7 +82,7 @@ public class ItemsView {
                 ? new ItemBuilder(Material.BARRIER).setDisplayName("Exit") :
                 OraxenItems.getItemById(Settings.ORAXEN_INV_EXIT.toString())
         ).build();
-        mainGui.setItem(6, 5, new GuiItem(exitIcon, event -> mainGui.open(event.getWhoClicked())));
+        mainGui.setItem(6, 5, new GuiItem(exitIcon, event -> event.getWhoClicked().closeInventory()));
 
         return mainGui;
     }
@@ -135,7 +134,7 @@ public class ItemsView {
 
         itemStack = icon.map(OraxenItems::getItemById).map(ItemBuilder::clone)
                 .orElse(OraxenItems.getMap().get(file).values().stream().findFirst().orElse(new ItemBuilder(Material.PAPER)))
-                .clone().addItemFlags(ItemFlag.HIDE_ATTRIBUTES).setDisplayName(displayName).setLore(new ArrayList<>()).build();
+                .clone().addItemFlags(ItemFlag.HIDE_ATTRIBUTES).setItemName(displayName).setDisplayName(displayName).setLore(new ArrayList<>()).build();
 
         // avoid possible bug if isOraxenItems is available but can't be an itemstack
         if (itemStack == null) itemStack = new ItemBuilder(Material.PAPER).setDisplayName(displayName).build();
