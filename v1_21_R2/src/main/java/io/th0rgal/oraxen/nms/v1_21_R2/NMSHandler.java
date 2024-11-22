@@ -1,4 +1,4 @@
-package io.th0rgal.oraxen.nms.v1_20_R4;
+package io.th0rgal.oraxen.nms.v1_21_R2;
 
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
@@ -10,27 +10,36 @@ import io.th0rgal.oraxen.items.ItemBuilder;
 import io.th0rgal.oraxen.mechanics.provided.gameplay.noteblock.NoteBlockMechanicFactory;
 import io.th0rgal.oraxen.nms.GlyphHandler;
 import io.th0rgal.oraxen.utils.BlockHelpers;
-import io.th0rgal.oraxen.utils.PotionUtils;
 import io.th0rgal.oraxen.utils.VersionUtil;
 import io.th0rgal.oraxen.utils.logs.Logs;
-import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntList;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.HolderSet;
 import net.minecraft.core.Registry;
 import net.minecraft.core.component.DataComponentType;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.common.ClientboundUpdateTagsPacket;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.tags.BlockTags;
+import net.minecraft.sounds.SoundEvent;
 import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.ItemUseAnimation;
+import net.minecraft.world.item.component.Consumable;
+import net.minecraft.world.item.component.CustomData;
+import net.minecraft.world.item.consume_effects.*;
 import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.item.context.DirectionalPlaceContext;
 import net.minecraft.world.item.context.UseOnContext;
@@ -38,7 +47,7 @@ import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
-import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.EnumUtils;
 import org.bukkit.NamespacedKey;
 import org.bukkit.SoundCategory;
 import org.bukkit.SoundGroup;
@@ -52,23 +61,20 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.components.FoodComponent;
-import org.bukkit.potion.PotionEffect;
-import org.bukkit.potion.PotionEffectType;
 import org.jetbrains.annotations.NotNull;
 
 import javax.annotation.Nullable;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
+import java.util.stream.Collectors;
 
 public class NMSHandler implements io.th0rgal.oraxen.nms.NMSHandler {
 
     private final GlyphHandler glyphHandler;
 
     public NMSHandler() {
-        this.glyphHandler = new io.th0rgal.oraxen.nms.v1_20_R4.GlyphHandler();
+        this.glyphHandler = new io.th0rgal.oraxen.nms.v1_21_R2.GlyphHandler();
 
         // mineableWith tag handling
         NamespacedKey tagKey = NamespacedKey.fromString("mineable_with_key", OraxenPlugin.get());
@@ -112,13 +118,25 @@ public class NMSHandler implements io.th0rgal.oraxen.nms.NMSHandler {
     public ItemStack copyItemNBTTags(@NotNull ItemStack oldItem, @NotNull ItemStack newItem) {
         net.minecraft.world.item.ItemStack newNmsItem = CraftItemStack.asNMSCopy(newItem);
         net.minecraft.world.item.ItemStack oldItemStack = CraftItemStack.asNMSCopy(oldItem);
-        CraftItemStack.asNMSCopy(oldItem).getTags().forEach(tag -> {
-            if (!tag.location().getNamespace().equals("minecraft")) return;
-            if (vanillaKeys.contains(tag.location().getPath())) return;
+        //Gets data component's nbt data.
+        DataComponentType<CustomData> type = DataComponents.CUSTOM_DATA;
+        CustomData oldData = oldItemStack.getComponents().get(type);
+        CustomData newData = newNmsItem.getComponents().get(type);
 
-            DataComponentType<Object> type = (DataComponentType<Object>) BuiltInRegistries.DATA_COMPONENT_TYPE.get(tag.location());
-            if (type != null) newNmsItem.set(type, oldItemStack.get(type));
-        });
+        //Cancels if null.
+        if (oldData == null || newData == null) return newItem;
+        //Creates new nbt compound.
+        CompoundTag oldTag = oldData.copyTag();
+        CompoundTag newTag = newData.copyTag();
+
+        for (String key : oldTag.getAllKeys()) {
+            if (vanillaKeys.contains(key)) continue;
+            Tag value = oldTag.get(key);
+            if (value != null) newTag.put(key, value);
+            else newTag.remove(key);
+        }
+
+        newNmsItem.set(type, CustomData.of(newTag));
         return CraftItemStack.asBukkitCopy(newNmsItem);
     }
 
@@ -195,9 +213,9 @@ public class NMSHandler implements io.th0rgal.oraxen.nms.NMSHandler {
         return null;
     }
 
-    private final Map<ResourceLocation, IntList> tagRegistryMap = createTagRegistryMap();
+    private final Map<ResourceLocation, IntList> tagRegistryMap = new HashMap();//createTagRegistryMap();
 
-    private static Map<ResourceLocation, IntList> createTagRegistryMap() {
+    /*private static Map<ResourceLocation, IntList> createTagRegistryMap() {
         return BuiltInRegistries.BLOCK.getTags().map(pair -> {
             IntArrayList list = new IntArrayList(pair.getSecond().size());
             if (pair.getFirst().location() == BlockTags.MINEABLE_WITH_AXE.location()) {
@@ -208,7 +226,7 @@ public class NMSHandler implements io.th0rgal.oraxen.nms.NMSHandler {
 
             return Map.of(pair.getFirst().location(), list);
         }).collect(HashMap::new, Map::putAll, Map::putAll);
-    }
+    }*/
 
     @Override
     public boolean getSupported() {
@@ -223,27 +241,102 @@ public class NMSHandler implements io.th0rgal.oraxen.nms.NMSHandler {
         foodComponent.setSaturation((float) foodSection.getDouble("saturation", 0.0));
         foodComponent.setCanAlwaysEat(foodSection.getBoolean("can_always_eat"));
 
-        foodComponent.setEatSeconds((float) foodSection.getDouble("eat_seconds", 1.6));
+        item.setFoodComponent(foodComponent);
+    }
 
-        ConfigurationSection effectsSection = foodSection.getConfigurationSection("effects");
-        if (effectsSection != null) for (String effect : effectsSection.getKeys(false)) {
-            ConfigurationSection effectSection = effectsSection.getConfigurationSection(effect);
-            PotionEffectType effectType = PotionUtils.getEffectType(effect);
-            if (effectSection == null || effectType == null)
-                Logs.logError("Invalid potion effect: " + effect + ", in " + StringUtils.substringBefore(effectsSection.getCurrentPath(), ".") + " food-property!");
-            else {
-                foodComponent.addEffect(
-                        new PotionEffect(effectType,
-                                effectSection.getInt("duration", 1) * 20,
-                                effectSection.getInt("amplifier", 0),
-                                effectSection.getBoolean("ambient", true),
-                                effectSection.getBoolean("show_particles", true),
-                                effectSection.getBoolean("show_icon", true)),
-                        (float) effectSection.getDouble("probability", 1.0)
-                );
-            }
+    @SuppressWarnings("UnstableApiUsage")
+    @Override
+    public void consumableComponent(ItemBuilder item, ConfigurationSection section) {
+
+        Consumable.Builder consumable = Consumable.builder();
+        Consumable template = Optional.ofNullable(CraftItemStack.asNMSCopy(new ItemStack(item.getType())).getComponents().get(DataComponents.CONSUMABLE)).orElse(Consumable.builder().build());
+
+        consumable.consumeSeconds((float) section.getDouble("consume_seconds", template.consumeSeconds()));
+        consumable.animation(Optional.ofNullable(EnumUtils.getEnum(ItemUseAnimation.class, section.getString("animation"))).orElse(template.animation()));
+        consumable.hasConsumeParticles(section.getBoolean("consume_particles", template.hasConsumeParticles()));
+        consumable.sound(Optional.ofNullable(section.getString("sound")).map(s -> Holder.direct(new SoundEvent(ResourceLocation.parse(s), Optional.empty()))).orElse(template.sound()));
+
+        List<Map<?, ?>> effectsMap = section.getMapList("effects");
+        if (effectsMap.isEmpty()) for (ConsumeEffect effect : template.onConsumeEffects()) consumable.onConsume(effect);
+        else for (Map<?, ?> effectSection : effectsMap) {
+            String type = Optional.ofNullable(effectSection.get("type")).map(Object::toString).orElse("");
+            if (type.equals("APPLY_EFFECTS") && effectSection.getOrDefault("effects", null) instanceof Map<?, ?> effects) {
+                for (Map.Entry<String, LinkedHashMap<String, Object>> effectMap : effects.entrySet().stream().map(o -> (Map.Entry<String, LinkedHashMap<String, Object>>) o).collect(Collectors.toSet())) {
+                    LinkedHashMap<String, Object> applyEffectSection = effectMap.getValue();
+
+                    BuiltInRegistries.MOB_EFFECT.getOptional(ResourceLocation.parse(effectMap.getKey()))
+                            .map(BuiltInRegistries.MOB_EFFECT::wrapAsHolder)
+                            .ifPresentOrElse(mobEffect -> {
+                                int duration = Optional.ofNullable(applyEffectSection.get("duration"))
+                                        .map(s -> Integer.parseInt(s.toString())).orElse(1) * 20;
+                                int amplifier = Optional.ofNullable(applyEffectSection.get("amplifier"))
+                                        .map(s -> Integer.parseInt(s.toString())).orElse(0);
+                                boolean ambient = Optional.ofNullable(applyEffectSection.get("ambient"))
+                                        .map(s -> Boolean.parseBoolean(s.toString())).orElse(true);
+                                boolean particles = Optional.ofNullable(applyEffectSection.get("show_particles"))
+                                        .map(s -> Boolean.parseBoolean(s.toString())).orElse(true);
+                                boolean icon = Optional.ofNullable(applyEffectSection.get("show_icon"))
+                                        .map(s -> Boolean.parseBoolean(s.toString())).orElse(true);
+                                float probability = Optional.ofNullable(applyEffectSection.get("amplifier"))
+                                        .map(s -> Float.parseFloat(s.toString())).orElse(0f);
+                                MobEffectInstance instance = new MobEffectInstance(mobEffect, duration, amplifier, ambient, particles, icon);
+
+                                consumable.onConsume(new ApplyStatusEffectsConsumeEffect(instance, probability));
+                            }, () -> Logs.logError("Invalid potion effect: " + effectMap.getKey() + ", in consumable-property!"));
+                }
+            } else if (type.equals("REMOVE_EFFECTS") && effectSection.getOrDefault("effects", null) instanceof ArrayList<?> effects) {
+                List<Holder<MobEffect>> mobEffects = new ArrayList<>();
+                for (Object object : effects) {
+                    BuiltInRegistries.MOB_EFFECT.getOptional(ResourceLocation.parse(String.valueOf(object)))
+                            .map(BuiltInRegistries.MOB_EFFECT::wrapAsHolder)
+                            .ifPresent(mobEffects::add);
+                }
+                consumable.onConsume(new RemoveStatusEffectsConsumeEffect(HolderSet.direct(mobEffects)));
+            } else if (type.equals("CLEAR_ALL_EFFECTS")) {
+                consumable.onConsume(new ClearAllStatusEffectsConsumeEffect());
+            } else if (type.equals("TELEPORT_RANDOMLY")) {
+                float diameter = (effectSection.getOrDefault("diameter", null) instanceof Float d) ? d : 16f;
+                consumable.onConsume(new TeleportRandomlyConsumeEffect(diameter));
+            } else if (type.equals("PLAY_SOUND")) {
+                try {
+                    ResourceLocation soundKey = Optional.ofNullable(effectSection.get("sound"))
+                            .map(Objects::toString).map(ResourceLocation::parse).orElse(template.sound().value().location());
+                    BuiltInRegistries.SOUND_EVENT.getOptional(soundKey)
+                            .map(BuiltInRegistries.SOUND_EVENT::wrapAsHolder)
+                            .map(PlaySoundConsumeEffect::new)
+                            .ifPresent(consumable::onConsume);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            } else Logs.logWarning("Invalid ConsumeEffect-Type " + type);
         }
 
-        item.setFoodComponent(foodComponent);
+        item.setConsumableComponent(consumable.build());
+    }
+
+    @Override
+    @Nullable
+    public Object consumableComponent(final ItemStack itemStack) {
+        if (itemStack == null) return null;
+        try {
+            net.minecraft.world.item.ItemStack nmsItem = CraftItemStack.asNMSCopy(itemStack);
+            return nmsItem.get(DataComponents.CONSUMABLE);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    @Override
+    public ItemStack consumableComponent(final ItemStack itemStack, @Nullable Object consumable) {
+        if (consumable == null) return itemStack;
+        try {
+            net.minecraft.world.item.ItemStack nmsItem = CraftItemStack.asNMSCopy(itemStack);
+            nmsItem.set(DataComponents.CONSUMABLE, (Consumable) consumable);
+            return CraftItemStack.asBukkitCopy(nmsItem);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return itemStack;
     }
 }
